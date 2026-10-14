@@ -1,4 +1,4 @@
-name: Build Pulse Finance APK
+name: Build-Pulse Finance APK
 
 on:
   push:
