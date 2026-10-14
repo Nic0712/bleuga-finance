@@ -1,0 +1,2430 @@
+name: Build Pulse Finance APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate Android Project Files
+        run: |
+          python3 - << 'EOF'
+          from pathlib import Path
+
+          FILES = {
+              "settings.gradle.kts": r'''pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "PulseFinance"
+          include(":app")
+          ''',
+
+              "build.gradle.kts": r'''plugins {
+              id("com.android.application") version "8.7.2" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21" apply false
+              id("com.google.devtools.ksp") version "2.0.21-1.0.27" apply false
+          }
+          ''',
+
+              "gradle.properties": r'''org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          ''',
+
+              "app/build.gradle.kts": r'''plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+              id("org.jetbrains.kotlin.plugin.serialization")
+              id("com.google.devtools.ksp")
+          }
+
+          android {
+              namespace = "com.nicholas.financetracker"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.nicholas.financetracker"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+              implementation(composeBom)
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-graphics")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+
+              val roomVersion = "2.6.1"
+              implementation("androidx.room:room-runtime:$roomVersion")
+              implementation("androidx.room:room-ktx:$roomVersion")
+              ksp("androidx.room:room-compiler:$roomVersion")
+
+              implementation("com.google.android.gms:play-services-location:21.3.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
+
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+          }
+          ''',
+
+              "app/src/main/AndroidManifest.xml": r'''<?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.nicholas.financetracker">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Pulse Finance"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".ui.MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".service.TransactionNotificationService"
+                      android:exported="true"
+                      android:label="Pulse Transaction Listener"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+
+              </application>
+          </manifest>
+          ''',
+
+              "app/src/main/java/com/nicholas/financetracker/data/local/AppDatabase.kt": r'''package com.nicholas.financetracker.data.local
+
+          import android.content.Context
+          import androidx.room.*
+          import kotlinx.coroutines.CoroutineScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.flow.Flow
+          import kotlinx.coroutines.launch
+          import kotlin.math.abs
+
+          enum class TransactionCategory(
+              val symbol: String,
+              val displayName: String,
+              val colorHex: Long
+          ) {
+              FOOD_DINING("🍔", "Food & Dining", 0xFFF97316),
+              COFFEE_DRINKS("☕", "Coffee & Beverages", 0xFFD97706),
+              GROCERIES("🛒", "Groceries & Essentials", 0xFF84CC16),
+              TRANSPORT_FUEL("🚗", "Transport & Fuel", 0xFF06B6D4),
+              SHOPPING("🛍️", "Shopping & Lifestyle", 0xFFEC4899),
+              BILLS_UTILITIES("💡", "Bills & Utilities", 0xFFEAB308),
+              ENTERTAINMENT("🎬", "Entertainment & Subs", 0xFFA855F7),
+              SELF_TRANSFER("🔄", "Self Transfer", 0xFF38BDF8),
+              P2P_SPLIT("💸", "P2P / Split Bill", 0xFFF43F5E),
+              INCOME("💰", "Income / Allowance", 0xFF10B981),
+              OTHER("📦", "Other", 0xFF71717A);
+
+              companion object {
+                  fun fromNameOrDefault(name: String): TransactionCategory {
+                      return entries.find { it.name.equals(name.trim(), ignoreCase = true) } ?: OTHER
+                  }
+              }
+          }
+
+          enum class TransactionType {
+              EXPENSE, INCOME, TRANSFER
+          }
+
+          @Entity(tableName = "accounts")
+          data class AccountEntity(
+              @PrimaryKey(autoGenerate = true) val id: Long = 0,
+              val name: String,
+              val balance: Double,
+              val currency: String = "MYR"
+          )
+
+          @Entity(
+              tableName = "transactions",
+              indices = [Index(value = ["timestamp"]), Index(value = ["sourceAccountId"])]
+          )
+          data class TransactionEntity(
+              @PrimaryKey(autoGenerate = true) val id: Long = 0,
+              val timestamp: Long,
+              val amount: Double,
+              val originalAmount: Double = amount,
+              val originalCurrency: String = "MYR",
+              val rawMerchantOrRecipient: String,
+              val displayName: String,
+              val category: String,
+              val transactionType: String,
+              val isSelfTransfer: Boolean,
+              val sourceAccountId: Long,
+              val destinationAccountId: Long? = null,
+              val latitude: Double? = null,
+              val longitude: Double? = null,
+              val locationLabel: String? = null,
+              val rawNotificationText: String? = null
+          )
+
+          @Entity(
+              tableName = "merchant_rules",
+              indices = [Index(value = ["normalizedRecipient"], unique = true)]
+          )
+          data class MerchantRuleEntity(
+              @PrimaryKey(autoGenerate = true) val id: Long = 0,
+              val normalizedRecipient: String,
+              val customDisplayName: String,
+              val assignedCategory: String,
+              val forceSelfTransfer: Boolean = false,
+              val defaultDestinationAccountId: Long? = null,
+              val savedLatitude: Double? = null,
+              val savedLongitude: Double? = null
+          )
+
+          @Dao
+          interface FinanceDao {
+              @Query("SELECT * FROM accounts ORDER BY id ASC")
+              fun observeAccounts(): Flow<List<AccountEntity>>
+
+              @Query("SELECT * FROM accounts ORDER BY id ASC")
+              suspend fun getAllAccountsOnce(): List<AccountEntity>
+
+              @Query("SELECT * FROM accounts WHERE id = :id LIMIT 1")
+              suspend fun getAccountById(id: Long): AccountEntity?
+
+              @Insert(onConflict = OnConflictStrategy.REPLACE)
+              suspend fun insertAccounts(accounts: List<AccountEntity>)
+
+              @Update
+              suspend fun updateAccount(account: AccountEntity)
+
+              @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
+              fun observeAllTransactions(): Flow<List<TransactionEntity>>
+
+              @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
+              suspend fun getAllTransactionsOnce(): List<TransactionEntity>
+
+              @Query("SELECT * FROM merchant_rules")
+              suspend fun getAllMerchantRules(): List<MerchantRuleEntity>
+
+              @Query("SELECT * FROM merchant_rules WHERE normalizedRecipient = :normalized LIMIT 1")
+              suspend fun findRuleForRecipient(normalized: String): MerchantRuleEntity?
+
+              @Insert(onConflict = OnConflictStrategy.REPLACE)
+              suspend fun upsertMerchantRule(rule: MerchantRuleEntity)
+
+              @Insert
+              suspend fun insertRawTransaction(tx: TransactionEntity): Long
+
+              @Update
+              suspend fun updateRawTransaction(tx: TransactionEntity)
+
+              @Delete
+              suspend fun deleteRawTransaction(tx: TransactionEntity)
+
+              @Transaction
+              suspend fun insertTransactionAndSyncBalances(tx: TransactionEntity): Long {
+                  val id = insertRawTransaction(tx)
+                  applyBalanceDelta(tx, revert = false)
+                  return id
+              }
+
+              @Transaction
+              suspend fun updateTransactionAndSyncBalances(oldTx: TransactionEntity, newTx: TransactionEntity) {
+                  applyBalanceDelta(oldTx, revert = true)
+                  updateRawTransaction(newTx)
+                  applyBalanceDelta(newTx, revert = false)
+              }
+
+              @Transaction
+              suspend fun deleteTransactionAndSyncBalances(tx: TransactionEntity) {
+                  applyBalanceDelta(tx, revert = true)
+                  deleteRawTransaction(tx)
+              }
+
+              @Transaction
+              suspend fun bulkInsertAndSyncBalances(txList: List<TransactionEntity>) {
+                  for (tx in txList) {
+                      insertRawTransaction(tx)
+                      applyBalanceDelta(tx, revert = false)
+                  }
+              }
+
+              suspend fun applyBalanceDelta(tx: TransactionEntity, revert: Boolean) {
+                  val sign = if (revert) -1.0 else 1.0
+                  val type = runCatching { TransactionType.valueOf(tx.transactionType) }
+                      .getOrDefault(if (tx.isSelfTransfer) TransactionType.TRANSFER else TransactionType.EXPENSE)
+
+                  when (type) {
+                      TransactionType.EXPENSE -> {
+                          getAccountById(tx.sourceAccountId)?.let { acc ->
+                              updateAccount(acc.copy(balance = acc.balance - (tx.amount * sign)))
+                          }
+                      }
+                      TransactionType.INCOME -> {
+                          getAccountById(tx.sourceAccountId)?.let { acc ->
+                              updateAccount(acc.copy(balance = acc.balance + (tx.amount * sign)))
+                          }
+                      }
+                      TransactionType.TRANSFER -> {
+                          getAccountById(tx.sourceAccountId)?.let { src ->
+                              updateAccount(src.copy(balance = src.balance - (tx.amount * sign)))
+                          }
+                          tx.destinationAccountId?.let { destId ->
+                              getAccountById(destId)?.let { dst ->
+                                  updateAccount(dst.copy(balance = dst.balance + (tx.amount * sign)))
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Database(
+              entities = [AccountEntity::class, TransactionEntity::class, MerchantRuleEntity::class],
+              version = 1,
+              exportSchema = false
+          )
+          abstract class AppDatabase : RoomDatabase() {
+              abstract fun financeDao(): FinanceDao
+
+              companion object {
+                  @Volatile
+                  private var INSTANCE: AppDatabase? = null
+
+                  val DEFAULT_ACCOUNTS = listOf(
+                      AccountEntity(id = 1, name = "Main Bank (MAE)", balance = 0.0, currency = "MYR"),
+                      AccountEntity(id = 2, name = "Bank of China", balance = 0.0, currency = "MYR"),
+                      AccountEntity(id = 3, name = "TNG eWallet", balance = 0.0, currency = "MYR"),
+                      AccountEntity(id = 4, name = "S Pay Global", balance = 0.0, currency = "MYR"),
+                      AccountEntity(id = 5, name = "Cash", balance = 0.0, currency = "MYR")
+                  )
+
+                  fun getInstance(context: Context): AppDatabase {
+                      return INSTANCE ?: synchronized(this) {
+                          val instance = Room.databaseBuilder(
+                              context.applicationContext,
+                              AppDatabase::class.java,
+                              "pulse_finance.db"
+                          )
+                              .addCallback(object : Callback() {
+                                  override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                                      super.onOpen(db)
+                                      CoroutineScope(Dispatchers.IO).launch {
+                                          val dao = getInstance(context).financeDao()
+                                          if (dao.getAllAccountsOnce().isEmpty()) {
+                                              dao.insertAccounts(DEFAULT_ACCOUNTS)
+                                          }
+                                      }
+                                  }
+                              })
+                              .build()
+                          INSTANCE = instance
+                          instance
+                      }
+                  }
+
+                  fun normalizeRecipientKey(raw: String): String {
+                      return raw.trim().uppercase().replace(Regex("\\s+"), " ")
+                  }
+
+                  fun isLikelyDuplicate(
+                      candidateTimestamp: Long,
+                      candidateAmountMyr: Double,
+                      candidateMerchant: String,
+                      existingList: List<TransactionEntity>
+                  ): Boolean {
+                      val eighteenHoursMs = 18 * 60 * 60 * 1000L
+                      val normCand = normalizeRecipientKey(candidateMerchant)
+                      return existingList.any { existing ->
+                          val timeClose = abs(existing.timestamp - candidateTimestamp) <= eighteenHoursMs
+                          val amountSame = abs(existing.amount - candidateAmountMyr) < 0.02
+                          val existingNorm = normalizeRecipientKey(existing.rawMerchantOrRecipient)
+                          val nameOverlap = existingNorm.contains(normCand.take(6)) ||
+                              normCand.contains(existingNorm.take(6))
+                          timeClose && amountSame && nameOverlap
+                      }
+                  }
+              }
+          }
+          ''',
+
+              "app/src/main/java/com/nicholas/financetracker/data/remote/GeminiFinanceEngine.kt": r'''package com.nicholas.financetracker.data.remote
+
+          import android.content.ContentResolver
+          import android.net.Uri
+          import android.util.Base64
+          import com.nicholas.financetracker.data.local.*
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import kotlinx.serialization.Serializable
+          import kotlinx.serialization.json.*
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+          import java.time.Instant
+          import java.time.LocalDate
+          import java.time.ZoneId
+          import java.time.format.DateTimeFormatter
+          import java.util.concurrent.TimeUnit
+
+          @Serializable
+          data class ParsedNotificationDto(
+              val amount: Double = 0.0,
+              val currency: String = "MYR",
+              val amountInMyr: Double = 0.0,
+              val rawMerchantOrRecipient: String = "Unknown",
+              val cleanDisplayName: String = "Unknown",
+              val sourceAccountName: String = "Main Bank (MAE)",
+              val destinationAccountName: String? = null,
+              val transactionType: String = "EXPENSE",
+              val category: String = "OTHER",
+              val isSelfTransfer: Boolean = false,
+              val inferredLocationLabel: String? = null
+          )
+
+          @Serializable
+          data class ExtractedTransactionDto(
+              val isoDate: String = "2026-10-15",
+              val amount: Double = 0.0,
+              val currency: String = "MYR",
+              val amountInMyr: Double = 0.0,
+              val rawMerchantOrRecipient: String = "",
+              val cleanDisplayName: String = "",
+              val sourceAccountName: String = "Main Bank (MAE)",
+              val destinationAccountName: String? = null,
+              val transactionType: String = "EXPENSE",
+              val category: String = "OTHER",
+              val isSelfTransfer: Boolean = false
+          )
+
+          data class NearbyLocationContext(
+              val areaName: String?,
+              val poiDescriptions: List<String>
+          )
+
+          object GeminiFinanceEngine {
+
+              private const val PRIMARY_MODEL_ID = "gemini-3.8-flash"
+              private const val FALLBACK_MODEL_ID = "gemini-2.5-flash"
+
+              private val httpClient = OkHttpClient.Builder()
+                  .connectTimeout(25, TimeUnit.SECONDS)
+                  .readTimeout(60, TimeUnit.SECONDS)
+                  .writeTimeout(30, TimeUnit.SECONDS)
+                  .build()
+
+              private val json = Json {
+                  ignoreUnknownKeys = true
+                  isLenient = true
+                  coerceInputValues = true
+              }
+
+              private const val OWNER_ALIASES = "Nicholas Soo Wei Ming, Nicholas Soo, Soo Wei Ming"
+
+              suspend fun fetchNearbyOsmContext(lat: Double, lon: Double): NearbyLocationContext =
+                  withContext(Dispatchers.IO) {
+                      val pois = mutableListOf<String>()
+                      var areaName: String? = null
+
+                      runCatching {
+                          val overpassQuery = """
+                              [out:json][timeout:8];
+                              (
+                                node(around:100,$lat,$lon)["amenity"~"restaurant|cafe|fast_food|food_court|marketplace|fuel|college|university"];
+                                way(around:100,$lat,$lon)["amenity"~"restaurant|cafe|fast_food|food_court|marketplace|fuel|college|university"];
+                                node(around:100,$lat,$lon)["shop"~"convenience|supermarket|bakery|mall"];
+                              );
+                              out tags limit 12;
+                          """.trimIndent()
+
+                          val reqBody = "data=${java.net.URLEncoder.encode(overpassQuery, "UTF-8")}"
+                              .toRequestBody("application/x-www-form-urlencoded".toMediaType())
+
+                          val req = Request.Builder()
+                              .url("https://overpass-api.de/api/interpreter")
+                              .header("User-Agent", "PulseFinanceAndroid/1.0")
+                              .post(reqBody)
+                              .build()
+
+                          httpClient.newCall(req).execute().use { resp ->
+                              if (resp.isSuccessful) {
+                                  val root = json.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
+                                  val elements = root["elements"]?.jsonArray ?: emptyList()
+                                  for (el in elements) {
+                                      val tags = el.jsonObject["tags"]?.jsonObject ?: continue
+                                      val name = tags["name"]?.jsonPrimitive?.contentOrNull
+                                      val amenity = tags["amenity"]?.jsonPrimitive?.contentOrNull
+                                          ?: tags["shop"]?.jsonPrimitive?.contentOrNull
+                                      if (!name.isNullOrBlank() && !amenity.isNullOrBlank()) {
+                                          pois.add("$name ($amenity)")
+                                      } else if (!amenity.isNullOrBlank()) {
+                                          pois.add("Unnamed $amenity")
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      runCatching {
+                          val url = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=$lat&lon=$lon&zoom=18"
+                          val req = Request.Builder()
+                              .url(url)
+                              .header("User-Agent", "PulseFinanceAndroid/1.0")
+                              .get()
+                              .build()
+
+                          httpClient.newCall(req).execute().use { resp ->
+                              if (resp.isSuccessful) {
+                                  val root = json.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
+                                  val name = root["name"]?.jsonPrimitive?.contentOrNull
+                                  val addr = root["address"]?.jsonObject
+                                  val suburb = addr?.get("suburb")?.jsonPrimitive?.contentOrNull
+                                      ?: addr?.get("neighbourhood")?.jsonPrimitive?.contentOrNull
+                                      ?: addr?.get("road")?.jsonPrimitive?.contentOrNull
+                                  areaName = listOfNotNull(name?.takeIf { it.isNotBlank() }, suburb)
+                                      .distinct()
+                                      .joinToString(", ")
+                                      .ifBlank { null }
+                              }
+                          }
+                      }
+
+                      NearbyLocationContext(areaName = areaName, poiDescriptions = pois.distinct())
+                  }
+
+              suspend fun parseLiveNotification(
+                  apiKey: String,
+                  appPackage: String,
+                  notificationText: String,
+                  timestampMs: Long,
+                  lat: Double?,
+                  lon: Double?,
+                  accounts: List<AccountEntity>,
+                  savedRules: List<MerchantRuleEntity>
+              ): ParsedNotificationDto = withContext(Dispatchers.IO) {
+
+                  val osmContext = if (lat != null && lon != null) {
+                      fetchNearbyOsmContext(lat, lon)
+                  } else {
+                      NearbyLocationContext(null, emptyList())
+                  }
+
+                  val accountNames = accounts.joinToString(", ") { it.name }
+                  val rulesSummary = savedRules.take(50).joinToString("\n") {
+                      "- If recipient matches '${it.normalizedRecipient}' -> Category: ${it.assignedCategory}, DisplayName: '${it.customDisplayName}', SelfTransfer: ${it.forceSelfTransfer}"
+                  }
+
+                  val timeFormatted = Instant.ofEpochMilli(timestampMs)
+                      .atZone(ZoneId.systemDefault())
+                      .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+
+                  val systemPrompt = """
+                      You are an expert Malaysian & Chinese Financial Transaction Parser powered by Gemini 3.8 Flash.
+                      Owner Identity & Aliases: $OWNER_ALIASES
+                      Known User Accounts: $accountNames
+                      Valid Categories: FOOD_DINING, COFFEE_DRINKS, GROCERIES, TRANSPORT_FUEL, SHOPPING, BILLS_UTILITIES, ENTERTAINMENT, SELF_TRANSFER, P2P_SPLIT, INCOME, OTHER.
+
+                      User's Learned Merchant Override Rules (Apply these first if matched):
+                      $rulesSummary
+
+                      CRITICAL RULES:
+                      1. SELF-TRANSFER DETECTION: If the notification shows a reload/top-up to the user's own e-wallet (e.g., TNG eWallet, S Pay Global) or a transfer where the sender/recipient is $OWNER_ALIASES or another one of the user's own accounts, set isSelfTransfer = true, transactionType = "TRANSFER", category = "SELF_TRANSFER", and identify both sourceAccountName and destinationAccountName.
+                      2. PERSON-NAME QR VENDOR RESOLUTION: In Malaysia, small food stalls, campus cafes, and hawkers use personal DuitNow QR codes showing a person's name. Look at the GPS Nearby POIs and Area Name provided. If the recipient is a person's name, the amount is reasonable for food/drinks (under RM 65), and the phone is near a restaurant, cafe, food court, campus, or night market, classify as FOOD_DINING (or COFFEE_DRINKS) instead of P2P_SPLIT, and format cleanDisplayName as "[Recipient Name] @ [Best POI or Area Name]".
+                      3. CURRENCY CONVERSION: If the notification is in CNY/RMB (e.g., from Bank of China), convert amountInMyr using 1 CNY = 0.61 MYR. Otherwise amountInMyr = amount.
+                  """.trimIndent()
+
+                  val userPrompt = """
+                      Source App Package: $appPackage
+                      Timestamp: $timeFormatted
+                      Raw Notification: $notificationText
+                      GPS Coordinates: ${if (lat != null) "$lat, $lon" else "Not available"}
+                      Reverse Geocoded Area: ${osmContext.areaName ?: "Unknown"}
+                      Nearby POIs within 100m: ${osmContext.poiDescriptions.joinToString("; ").ifBlank { "None detected" }}
+                  """.trimIndent()
+
+                  val responseSchema = buildJsonObject {
+                      put("type", "OBJECT")
+                      putJsonObject("properties") {
+                          putJsonObject("amount") { put("type", "NUMBER") }
+                          putJsonObject("currency") { put("type", "STRING") }
+                          putJsonObject("amountInMyr") { put("type", "NUMBER") }
+                          putJsonObject("rawMerchantOrRecipient") { put("type", "STRING") }
+                          putJsonObject("cleanDisplayName") { put("type", "STRING") }
+                          putJsonObject("sourceAccountName") { put("type", "STRING") }
+                          putJsonObject("destinationAccountName") { put("type", "STRING"); put("nullable", true) }
+                          putJsonObject("transactionType") { put("type", "STRING") }
+                          putJsonObject("category") { put("type", "STRING") }
+                          putJsonObject("isSelfTransfer") { put("type", "BOOLEAN") }
+                          putJsonObject("inferredLocationLabel") { put("type", "STRING"); put("nullable", true) }
+                      }
+                      putJsonArray("required") {
+                          add("amount"); add("currency"); add("amountInMyr")
+                          add("rawMerchantOrRecipient"); add("cleanDisplayName")
+                          add("sourceAccountName"); add("transactionType")
+                          add("category"); add("isSelfTransfer")
+                      }
+                  }
+
+                  val requestPayload = buildJsonObject {
+                      putJsonObject("system_instruction") {
+                          putJsonArray("parts") { add(buildJsonObject { put("text", systemPrompt) }) }
+                      }
+                      putJsonArray("contents") {
+                          add(buildJsonObject {
+                              put("role", "user")
+                              putJsonArray("parts") { add(buildJsonObject { put("text", userPrompt) }) }
+                          })
+                      }
+                      putJsonObject("generationConfig") {
+                          put("responseMimeType", "application/json")
+                          put("responseSchema", responseSchema)
+                          put("temperature", 0.1)
+                      }
+                  }
+val rawJsonText = executeGeminiCall(apiKey, requestPayload.toString())
+                  val parsed = runCatching {
+                      json.decodeFromString<ParsedNotificationDto>(rawJsonText)
+                  }.getOrElse {
+                      fallbackHeuristicParse(appPackage, notificationText, osmContext.areaName)
+                  }
+
+                  parsed.copy(
+                      inferredLocationLabel = parsed.inferredLocationLabel ?: osmContext.areaName
+                  )
+              }
+
+              suspend fun parseStatementFiles(
+                  apiKey: String,
+                  contentResolver: ContentResolver,
+                  fileUris: List<Uri>,
+                  accounts: List<AccountEntity>,
+                  savedRules: List<MerchantRuleEntity>
+              ): List<ExtractedTransactionDto> = withContext(Dispatchers.IO) {
+                  if (apiKey.isBlank() || fileUris.isEmpty()) return@withContext emptyList()
+
+                  val accountNames = accounts.joinToString(", ") { it.name }
+                  val rulesSummary = savedRules.take(80).joinToString("\n") {
+                      "- '${it.normalizedRecipient}' -> Category: ${it.assignedCategory}, DisplayName: '${it.customDisplayName}', SelfTransfer: ${it.forceSelfTransfer}"
+                  }
+
+                  val systemPrompt = """
+                      You are an elite Financial Statement & Screenshot Batch Extractor powered by Gemini 3.8 Flash.
+                      Extract EVERY individual transaction row from the attached bank/e-wallet statement(s) or transaction history screenshot(s).
+
+                      Owner Identity & Aliases: $OWNER_ALIASES
+                      Known User Accounts: $accountNames
+                      Valid Categories: FOOD_DINING, COFFEE_DRINKS, GROCERIES, TRANSPORT_FUEL, SHOPPING, BILLS_UTILITIES, ENTERTAINMENT, SELF_TRANSFER, P2P_SPLIT, INCOME, OTHER.
+
+                      Saved User Override Rules:
+                      $rulesSummary
+
+                      INSTRUCTIONS:
+                      1. Extract every transaction accurately. Format isoDate as YYYY-MM-DD.
+                      2. Match sourceAccountName to the user's known accounts.
+                      3. Detect all e-wallet top-ups, reloads, and transfers to/from $OWNER_ALIASES or between the user's own accounts as isSelfTransfer = true, transactionType = "TRANSFER", category = "SELF_TRANSFER".
+                      4. If amounts are in CNY/RMB, convert amountInMyr using 1 CNY = 0.61 MYR. If already in MYR/RM, amountInMyr = amount.
+                  """.trimIndent()
+
+                  val partsArray = buildJsonArray {
+                      add(buildJsonObject {
+                          put("text", "Extract all historical transactions from these uploaded statement files/screenshots into the structured JSON list.")
+                      })
+
+                      for (uri in fileUris) {
+                          val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+                          val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: continue
+
+                          if (mimeType.contains("csv") || mimeType.contains("text")) {
+                              val csvText = bytes.toString(Charsets.UTF_8)
+                              add(buildJsonObject {
+                                  put("text", "CSV File Content:\n$csvText")
+                              })
+                          } else {
+                              val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                              val resolvedMime = when {
+                                  mimeType.contains("pdf") -> "application/pdf"
+                                  mimeType.startsWith("image/") -> mimeType
+                                  else -> "image/jpeg"
+                              }
+                              add(buildJsonObject {
+                                  putJsonObject("inline_data") {
+                                      put("mime_type", resolvedMime)
+                                      put("data", b64)
+                                  }
+                              })
+                          }
+                      }
+                  }
+
+                  val itemSchema = buildJsonObject {
+                      put("type", "OBJECT")
+                      putJsonObject("properties") {
+                          putJsonObject("isoDate") { put("type", "STRING") }
+                          putJsonObject("amount") { put("type", "NUMBER") }
+                          putJsonObject("currency") { put("type", "STRING") }
+                          putJsonObject("amountInMyr") { put("type", "NUMBER") }
+                          putJsonObject("rawMerchantOrRecipient") { put("type", "STRING") }
+                          putJsonObject("cleanDisplayName") { put("type", "STRING") }
+                          putJsonObject("sourceAccountName") { put("type", "STRING") }
+                          putJsonObject("destinationAccountName") { put("type", "STRING"); put("nullable", true) }
+                          putJsonObject("transactionType") { put("type", "STRING") }
+                          putJsonObject("category") { put("type", "STRING") }
+                          putJsonObject("isSelfTransfer") { put("type", "BOOLEAN") }
+                      }
+                      putJsonArray("required") {
+                          add("isoDate"); add("amount"); add("currency"); add("amountInMyr")
+                          add("rawMerchantOrRecipient"); add("cleanDisplayName")
+                          add("sourceAccountName"); add("transactionType")
+                          add("category"); add("isSelfTransfer")
+                      }
+                  }
+
+                  val arraySchema = buildJsonObject {
+                      put("type", "ARRAY")
+                      put("items", itemSchema)
+                  }
+
+                  val requestPayload = buildJsonObject {
+                      putJsonObject("system_instruction") {
+                          putJsonArray("parts") { add(buildJsonObject { put("text", systemPrompt) }) }
+                      }
+                      putJsonArray("contents") {
+                          add(buildJsonObject {
+                              put("role", "user")
+                              put("parts", partsArray)
+                          })
+                      }
+                      putJsonObject("generationConfig") {
+                          put("responseMimeType", "application/json")
+                          put("responseSchema", arraySchema)
+                          put("temperature", 0.1)
+                      }
+                  }
+
+                  val rawResponse = executeGeminiCall(apiKey, requestPayload.toString())
+                  runCatching {
+                      json.decodeFromString<List<ExtractedTransactionDto>>(rawResponse)
+                  }.getOrElse { emptyList() }
+              }
+
+              private fun executeGeminiCall(apiKey: String, jsonBody: String): String {
+                  val primaryUrl = "https://generativelanguage.googleapis.com/v1beta/models/$PRIMARY_MODEL_ID:generateContent?key=$apiKey"
+                  val req = Request.Builder()
+                      .url(primaryUrl)
+                      .post(jsonBody.toRequestBody("application/json".toMediaType()))
+                      .build()
+
+                  httpClient.newCall(req).execute().use { response ->
+                      if (response.isSuccessful) {
+                          return extractCandidateText(response.body?.string().orEmpty())
+                      }
+                  }
+
+                  // Automatic fallback if gemini-3.8-flash endpoint is not yet enabled on the key
+                  val fallbackUrl = "https://generativelanguage.googleapis.com/v1beta/models/$FALLBACK_MODEL_ID:generateContent?key=$apiKey"
+                  val fallbackReq = Request.Builder()
+                      .url(fallbackUrl)
+                      .post(jsonBody.toRequestBody("application/json".toMediaType()))
+                      .build()
+
+                  httpClient.newCall(fallbackReq).execute().use { response ->
+                      val bodyStr = response.body?.string().orEmpty()
+                      if (!response.isSuccessful) {
+                          throw IllegalStateException("Gemini API Error ${response.code}: $bodyStr")
+                      }
+                      return extractCandidateText(bodyStr)
+                  }
+              }
+
+              private fun extractCandidateText(bodyStr: String): String {
+                  val root = json.parseToJsonElement(bodyStr).jsonObject
+                  return root["candidates"]?.jsonArray?.firstOrNull()
+                      ?.jsonObject?.get("content")?.jsonObject
+                      ?.get("parts")?.jsonArray?.firstOrNull()
+                      ?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull ?: "[]"
+              }
+
+              fun fallbackHeuristicParse(
+                  appPackage: String,
+                  notificationText: String,
+                  areaName: String?
+              ): ParsedNotificationDto {
+                  val rmRegex = Regex("""(?:RM|MYR)\s*([0-9]+(?:\.[0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
+                  val cnyRegex = Regex("""(?:RMB|CNY|¥)\s*([0-9]+(?:\.[0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
+
+                  val rmMatch = rmRegex.find(notificationText)
+                  val cnyMatch = cnyRegex.find(notificationText)
+
+                  val (amount, currency, amountMyr) = when {
+                      rmMatch != null -> {
+                          val v = rmMatch.groupValues[1].toDoubleOrNull() ?: 0.0
+                          Triple(v, "MYR", v)
+                      }
+                      cnyMatch != null -> {
+                          val v = cnyMatch.groupValues[1].toDoubleOrNull() ?: 0.0
+                          Triple(v, "CNY", v * 0.61)
+                      }
+                      else -> Triple(0.0, "MYR", 0.0)
+                  }
+
+                  val lower = notificationText.lowercase()
+                  val isSelf = lower.contains("nicholas soo") ||
+                      lower.contains("soo wei ming") ||
+                      lower.contains("reload") ||
+                      lower.contains("top up")
+
+                  val sourceAcc = when {
+                      appPackage.contains("tngdigital") || lower.contains("tng") -> "TNG eWallet"
+                      appPackage.contains("spay") || lower.contains("s pay") -> "S Pay Global"
+                      appPackage.contains("boc") || lower.contains("bank of china") -> "Bank of China"
+                      else -> "Main Bank (MAE)"
+                  }
+
+                  val merchant = notificationText.take(45).trim()
+                  val display = if (areaName != null && !isSelf) "$merchant @ $areaName" else merchant
+
+                  return ParsedNotificationDto(
+                      amount = amount,
+                      currency = currency,
+                      amountInMyr = amountMyr,
+                      rawMerchantOrRecipient = merchant,
+                      cleanDisplayName = display,
+                      sourceAccountName = sourceAcc,
+                      destinationAccountName = if (isSelf) "TNG eWallet" else null,
+                      transactionType = if (isSelf) "TRANSFER" else "EXPENSE",
+                      category = if (isSelf) "SELF_TRANSFER" else "FOOD_DINING",
+                      isSelfTransfer = isSelf,
+                      inferredLocationLabel = areaName
+                  )
+              }
+
+              fun parseIsoDateToEpochMillis(isoString: String): Long {
+                  return runCatching {
+                      val clean = isoString.trim().take(10)
+                      LocalDate.parse(clean, DateTimeFormatter.ISO_LOCAL_DATE)
+                          .atStartOfDay(ZoneId.systemDefault())
+                          .toInstant()
+                          .toEpochMilli() + (12 * 3600 * 1000L)
+                  }.getOrElse { System.currentTimeMillis() }
+              }
+          }
+          ''',
+
+              "app/src/main/java/com/nicholas/financetracker/service/TransactionNotificationService.kt": r'''package com.nicholas.financetracker.service
+
+          import android.annotation.SuppressLint
+          import android.app.Notification
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+          import androidx.core.content.ContextCompat
+          import com.google.android.gms.location.LocationServices
+          import com.google.android.gms.location.Priority
+          import com.google.android.gms.tasks.CancellationTokenSource
+          import com.nicholas.financetracker.data.local.*
+          import com.nicholas.financetracker.data.remote.GeminiFinanceEngine
+          import kotlinx.coroutines.CoroutineScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.SupervisorJob
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.tasks.await
+          import kotlinx.coroutines.withTimeoutOrNull
+          import java.util.concurrent.ConcurrentHashMap
+
+          class TransactionNotificationService : NotificationListenerService() {
+
+              private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+              private val recentNotificationsCache = ConcurrentHashMap<String, Long>()
+
+              companion object {
+                  const val PREFS_NAME = "pulse_finance_prefs"
+                  const val KEY_GEMINI_API = "gemini_api_key"
+
+                  private val MONITORED_PACKAGES = setOf(
+                      "com.maybank2u.life",
+                      "my.com.tngdigital.ewallet",
+                      "my.gov.sarawak.paybills",
+                      "com.chinamworld.bocmbci",
+                      "com.boc.bocop.container",
+                      "com.cimb.octo",
+                      "com.pbebank.pbeengage",
+                      "com.rhbgroup.rhbmobilebanking",
+                      "com.hlb.connect.android",
+                      "com.grabtaxi.passenger"
+                  )
+
+                  private val PAYMENT_KEYWORDS = listOf(
+                      "rm", "myr", "cny", "rmb", "paid", "payment", "transfer",
+                      "duitnow", "reload", "deducted", "received", "spent", "成功", "支出", "人民币"
+                  )
+              }
+
+              override fun onNotificationPosted(sbn: StatusBarNotification?) {
+                  super.onNotificationPosted(sbn)
+                  if (sbn == null || sbn.isOngoing) return
+
+                  val pkg = sbn.packageName ?: return
+                  val extras = sbn.notification?.extras ?: return
+                  val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+                  val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+                  val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().orEmpty()
+
+                  val combinedText = listOf(title, bigText.ifBlank { text })
+                      .filter { it.isNotBlank() }
+                      .joinToString(" - ")
+                      .trim()
+
+                  if (combinedText.length < 6) return
+
+                  val isMonitoredApp = pkg in MONITORED_PACKAGES
+                  val hasPaymentKeyword = PAYMENT_KEYWORDS.any { combinedText.contains(it, ignoreCase = true) }
+                  val hasDigits = combinedText.any { it.isDigit() }
+
+                  if (!isMonitoredApp && !(hasPaymentKeyword && hasDigits)) return
+                  if (!hasPaymentKeyword || !hasDigits) return
+
+                  val dedupKey = "$pkg|$combinedText"
+                  val now = System.currentTimeMillis()
+                  val previousTime = recentNotificationsCache[dedupKey]
+                  if (previousTime != null && (now - previousTime) < 60_000L) return
+                  recentNotificationsCache[dedupKey] = now
+
+                  serviceScope.launch {
+                      processIncomingTransactionNotification(pkg, combinedText, now)
+                  }
+              }
+
+              @SuppressLint("MissingPermission")
+              private suspend fun fetchCurrentGpsCoordinates(): Pair<Double, Double>? {
+                  val hasFine = ContextCompat.checkSelfPermission(
+                      this, android.Manifest.permission.ACCESS_FINE_LOCATION
+                  ) == PackageManager.PERMISSION_GRANTED
+                  val hasCoarse = ContextCompat.checkSelfPermission(
+                      this, android.Manifest.permission.ACCESS_COARSE_LOCATION
+                  ) == PackageManager.PERMISSION_GRANTED
+
+                  if (!hasFine && !hasCoarse) return null
+
+                  val fusedClient = LocationServices.getFusedLocationProviderClient(this)
+                  return withTimeoutOrNull(6_000L) {
+                      runCatching {
+                          val cts = CancellationTokenSource()
+                          val loc = fusedClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cts.token).await()
+                              ?: fusedClient.lastLocation.await()
+                          if (loc != null) Pair(loc.latitude, loc.longitude) else null
+                      }.getOrNull()
+                  }
+              }
+
+              private suspend fun processIncomingTransactionNotification(
+                  appPackage: String,
+                  rawText: String,
+                  timestampMs: Long
+              ) {
+                  val db = AppDatabase.getInstance(applicationContext)
+                  val dao = db.financeDao()
+                  val accounts = dao.getAllAccountsOnce()
+                  val rules = dao.getAllMerchantRules()
+
+                  val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                  val apiKey = prefs.getString(KEY_GEMINI_API, "")?.trim().orEmpty()
+
+                  val gps = fetchCurrentGpsCoordinates()
+
+                  val parsed = if (apiKey.isNotBlank()) {
+                      GeminiFinanceEngine.parseLiveNotification(
+                          apiKey = apiKey,
+                          appPackage = appPackage,
+                          notificationText = rawText,
+                          timestampMs = timestampMs,
+                          lat = gps?.first,
+                          lon = gps?.second,
+                          accounts = accounts,
+                          savedRules = rules
+                      )
+                  } else {
+                      GeminiFinanceEngine.fallbackHeuristicParse(appPackage, rawText, null)
+                  }
+if (parsed.amountInMyr <= 0.0) return
+
+                  val normKey = AppDatabase.normalizeRecipientKey(parsed.rawMerchantOrRecipient)
+                  val matchedRule = dao.findRuleForRecipient(normKey)
+
+                  val finalCategory = matchedRule?.assignedCategory ?: parsed.category
+                  val finalDisplayName = matchedRule?.customDisplayName ?: parsed.cleanDisplayName
+                  val finalIsSelf = matchedRule?.forceSelfTransfer ?: parsed.isSelfTransfer
+                  val finalType = if (finalIsSelf) TransactionType.TRANSFER.name else parsed.transactionType
+
+                  val sourceAcc = accounts.find {
+                      it.name.equals(parsed.sourceAccountName, ignoreCase = true)
+                  } ?: accounts.first()
+
+                  val destAccId = matchedRule?.defaultDestinationAccountId ?: accounts.find {
+                      it.name.equals(parsed.destinationAccountName, ignoreCase = true)
+                  }?.id
+
+                  val entity = TransactionEntity(
+                      timestamp = timestampMs,
+                      amount = parsed.amountInMyr,
+                      originalAmount = parsed.amount,
+                      originalCurrency = parsed.currency,
+                      rawMerchantOrRecipient = parsed.rawMerchantOrRecipient,
+                      displayName = finalDisplayName,
+                      category = finalCategory,
+                      transactionType = finalType,
+                      isSelfTransfer = finalIsSelf,
+                      sourceAccountId = sourceAcc.id,
+                      destinationAccountId = if (finalIsSelf) (destAccId ?: accounts.getOrNull(2)?.id) else null,
+                      latitude = gps?.first,
+                      longitude = gps?.second,
+                      locationLabel = parsed.inferredLocationLabel,
+                      rawNotificationText = rawText
+                  )
+
+                  dao.insertTransactionAndSyncBalances(entity)
+              }
+          }
+          ''',
+
+              "app/src/main/java/com/nicholas/financetracker/ui/EditTransactionSheet.kt": r'''package com.nicholas.financetracker.ui
+
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.grid.GridCells
+          import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+          import androidx.compose.foundation.lazy.grid.items
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.SyncAlt
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import com.nicholas.financetracker.data.local.*
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun EditTransactionSheet(
+              transaction: TransactionEntity,
+              accounts: List<AccountEntity>,
+              onDismiss: () -> Unit,
+              onSave: (updatedTx: TransactionEntity, saveAsRule: Boolean) -> Unit,
+              onDelete: (TransactionEntity) -> Unit
+          ) {
+              var displayName by remember { mutableStateOf(transaction.displayName) }
+              var amountText by remember { mutableStateOf("%.2f".format(transaction.amount)) }
+              var locationLabel by remember { mutableStateOf(transaction.locationLabel.orEmpty()) }
+              var selectedCategory by remember {
+                  mutableStateOf(TransactionCategory.fromNameOrDefault(transaction.category))
+              }
+              var isSelfTransfer by remember { mutableStateOf(transaction.isSelfTransfer) }
+              var sourceAccountId by remember { mutableLongStateOf(transaction.sourceAccountId) }
+              var destinationAccountId by remember {
+                  mutableLongStateOf(
+                      transaction.destinationAccountId
+                          ?: accounts.firstOrNull { it.id != transaction.sourceAccountId }?.id
+                          ?: 1L
+                  )
+              }
+              var rememberRuleForFuture by remember { mutableStateOf(true) }
+
+              ModalBottomSheet(
+                  onDismissRequest = onDismiss,
+                  containerColor = Color(0xFF18181B),
+                  scrimColor = Color.Black.copy(alpha = 0.65f)
+              ) {
+                  Column(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(horizontal = 20.dp)
+                          .padding(bottom = 32.dp),
+                      verticalArrangement = Arrangement.spacedBy(14.dp)
+                  ) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.SpaceBetween,
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Text(
+                              text = "Edit Transaction",
+                              color = Color.White,
+                              fontSize = 18.sp,
+                              fontWeight = FontWeight.Bold
+                          )
+                          IconButton(onClick = { onDelete(transaction) }) {
+                              Icon(
+                                  imageVector = Icons.Default.Delete,
+                                  contentDescription = "Delete",
+                                  tint = Color(0xFFF43F5E)
+                              )
+                          }
+                      }
+
+                      Row(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .clip(RoundedCornerShape(12.dp))
+                              .background(if (isSelfTransfer) Color(0xFF0C4A6E) else Color(0xFF27272A))
+                              .clickable {
+                                  isSelfTransfer = !isSelfTransfer
+                                  if (isSelfTransfer) {
+                                      selectedCategory = TransactionCategory.SELF_TRANSFER
+                                  }
+                              }
+                              .padding(horizontal = 14.dp, vertical = 12.dp),
+                          horizontalArrangement = Arrangement.SpaceBetween,
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Row(
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.spacedBy(10.dp)
+                          ) {
+                              Icon(
+                                  imageVector = Icons.Default.SyncAlt,
+                                  contentDescription = null,
+                                  tint = Color(0xFF38BDF8)
+                              )
+                              Column {
+                                  Text(
+                                      text = "Flip to Self-Transfer 🔄",
+                                      color = Color.White,
+                                      fontWeight = FontWeight.SemiBold,
+                                      fontSize = 14.sp
+                                  )
+                                  Text(
+                                      text = "Excludes from monthly expense totals",
+                                      color = Color(0xFFA1A1AA),
+                                      fontSize = 11.sp
+                                  )
+                              }
+                          }
+                          Switch(
+                              checked = isSelfTransfer,
+                              onCheckedChange = {
+                                  isSelfTransfer = it
+                                  if (it) selectedCategory = TransactionCategory.SELF_TRANSFER
+                              }
+                          )
+                      }
+
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(10.dp)
+                      ) {
+                          OutlinedTextField(
+                              value = displayName,
+                              onValueChange = { displayName = it },
+                              label = { Text("Merchant / Display Name") },
+                              singleLine = true,
+                              modifier = Modifier.weight(1.6f),
+                              colors = OutlinedTextFieldDefaults.colors(
+                                  focusedTextColor = Color.White,
+                                  unfocusedTextColor = Color.White,
+                                  focusedBorderColor = Color(0xFF38BDF8),
+                                  unfocusedBorderColor = Color(0xFF3F3F46)
+                              )
+                          )
+                          OutlinedTextField(
+                              value = amountText,
+                              onValueChange = { amountText = it },
+                              label = { Text("RM Amount") },
+                              singleLine = true,
+                              keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                              modifier = Modifier.weight(1f),
+                              colors = OutlinedTextFieldDefaults.colors(
+                                  focusedTextColor = Color.White,
+                                  unfocusedTextColor = Color.White,
+                                  focusedBorderColor = Color(0xFF38BDF8),
+                                  unfocusedBorderColor = Color(0xFF3F3F46)
+                              )
+                          )
+                      }
+
+                      OutlinedTextField(
+                          value = locationLabel,
+                          onValueChange = { locationLabel = it },
+                          label = { Text("GPS Location / Stall Area") },
+                          singleLine = true,
+                          modifier = Modifier.fillMaxWidth(),
+                          colors = OutlinedTextFieldDefaults.colors(
+                              focusedTextColor = Color.White,
+                              unfocusedTextColor = Color.White,
+                              focusedBorderColor = Color(0xFF38BDF8),
+                              unfocusedBorderColor = Color(0xFF3F3F46)
+                          )
+                      )
+
+                      Text("From Account", color = Color(0xFFA1A1AA), fontSize = 12.sp)
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          accounts.forEach { acc ->
+                              val selected = acc.id == sourceAccountId
+                              FilterChip(
+                                  selected = selected,
+                                  onClick = { sourceAccountId = acc.id },
+                                  label = { Text(acc.name.take(10), fontSize = 11.sp) }
+                              )
+                          }
+                      }
+
+                      if (isSelfTransfer) {
+                          Text("To Destination Account", color = Color(0xFF38BDF8), fontSize = 12.sp)
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.spacedBy(6.dp)
+                          ) {
+                              accounts.filter { it.id != sourceAccountId }.forEach { acc ->
+                                  val selected = acc.id == destinationAccountId
+                                  FilterChip(
+                                      selected = selected,
+                                      onClick = { destinationAccountId = acc.id },
+                                      label = { Text(acc.name.take(10), fontSize = 11.sp) }
+                                  )
+                              }
+                          }
+                      }
+
+                      Text("Tap Category Symbol", color = Color(0xFFA1A1AA), fontSize = 12.sp)
+                      LazyVerticalGrid(
+                          columns = GridCells.Fixed(3),
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .height(175.dp),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp),
+                          verticalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          items(TransactionCategory.entries) { cat ->
+                              val isSelected = selectedCategory == cat
+                              Row(
+                                  modifier = Modifier
+                                      .clip(RoundedCornerShape(10.dp))
+                                      .background(
+                                          if (isSelected) Color(cat.colorHex).copy(alpha = 0.25f)
+                                          else Color(0xFF09090B)
+                                      )
+                                      .border(
+                                          width = 1.dp,
+                                          color = if (isSelected) Color(cat.colorHex) else Color(0xFF27272A),
+                                          shape = RoundedCornerShape(10.dp)
+                                      )
+                                      .clickable {
+                                          selectedCategory = cat
+                                          isSelfTransfer = (cat == TransactionCategory.SELF_TRANSFER)
+                                      }
+                                      .padding(horizontal = 8.dp, vertical = 10.dp),
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(6.dp)
+                              ) {
+                                  Text(text = cat.symbol, fontSize = 16.sp)
+                                  Text(
+                                      text = cat.displayName.substringBefore(" "),
+                                      color = Color.White,
+                                      fontSize = 11.sp,
+                                      maxLines = 1
+                                  )
+                              }
+                          }
+                      }
+
+                      Row(
+                          verticalAlignment = Alignment.CenterVertically,
+                          modifier = Modifier.clickable { rememberRuleForFuture = !rememberRuleForFuture }
+                      ) {
+                          Checkbox(
+                              checked = rememberRuleForFuture,
+                              onCheckedChange = { rememberRuleForFuture = it }
+                          )
+                          Text(
+                              text = "Auto-apply this name & category to '${transaction.rawMerchantOrRecipient.take(22)}' in future notifications & imports",
+                              color = Color(0xFFD4D4D8),
+                              fontSize = 12.sp
+                          )
+                      }
+
+                      Button(
+                          onClick = {
+                              val parsedAmt = amountText.toDoubleOrNull() ?: transaction.amount
+                              val newType = when {
+                                  isSelfTransfer -> TransactionType.TRANSFER.name
+                                  selectedCategory == TransactionCategory.INCOME -> TransactionType.INCOME.name
+                                  else -> TransactionType.EXPENSE.name
+                              }
+                              val updated = transaction.copy(
+                                  displayName = displayName.trim().ifBlank { transaction.displayName },
+                                  amount = parsedAmt,
+                                  locationLabel = locationLabel.trim().ifBlank { null },
+                                  category = selectedCategory.name,
+                                  isSelfTransfer = isSelfTransfer,
+                                  transactionType = newType,
+                                  sourceAccountId = sourceAccountId,
+                                  destinationAccountId = if (isSelfTransfer) destinationAccountId else null
+                              )
+                              onSave(updated, rememberRuleForFuture)
+                          },
+                          modifier = Modifier.fillMaxWidth(),
+                          colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                      ) {
+                          Text("Save Changes", color = Color.Black, fontWeight = FontWeight.Bold)
+                      }
+                  }
+              }
+          }
+          ''',
+
+              "app/src/main/java/com/nicholas/financetracker/ui/BulkImportDialog.kt": r'''package com.nicholas.financetracker.ui
+
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.itemsIndexed
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import com.nicholas.financetracker.data.local.TransactionCategory
+          import com.nicholas.financetracker.data.remote.ExtractedTransactionDto
+
+          data class ImportCandidateItem(
+              val dto: ExtractedTransactionDto,
+              val isDuplicate: Boolean,
+              val selectedToImport: Boolean = !isDuplicate
+          )
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun BulkImportDialog(
+              candidates: List<ImportCandidateItem>,
+              isLoading: Boolean,
+              errorMessage: String?,
+              onToggleSelect: (index: Int) -> Unit,
+              onCycleCategory: (index: Int) -> Unit,
+              onConfirmImport: () -> Unit,
+              onDismiss: () -> Unit
+          ) {
+              ModalBottomSheet(
+                  onDismissRequest = onDismiss,
+                  containerColor = Color(0xFF18181B)
+              ) {
+                  Column(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(horizontal = 18.dp)
+                          .padding(bottom = 28.dp),
+                      verticalArrangement = Arrangement.spacedBy(12.dp)
+                  ) {
+                      Text(
+                          text = "Gemini 3.8 Flash Bulk Importer",
+                          color = Color.White,
+                          fontSize = 18.sp,
+                          fontWeight = FontWeight.Bold
+                      )
+
+                      when {
+                          isLoading -> {
+                              Box(
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .height(220.dp),
+                                  contentAlignment = Alignment.Center
+                              ) {
+                                  Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                      CircularProgressIndicator(color = Color(0xFF38BDF8))
+                                      Spacer(modifier = Modifier.height(12.dp))
+                                      Text(
+                                          text = "Gemini 3.8 Flash is parsing statements, detecting self-transfers & deduplicating...",
+                                          color = Color(0xFFA1A1AA),
+                                          fontSize = 13.sp
+                                      )
+                                  }
+                              }
+                          }
+
+                          errorMessage != null -> {
+                              Text(
+                                  text = errorMessage,
+                                  color = Color(0xFFF43F5E),
+                                  fontSize = 13.sp
+                              )
+                          }
+
+                          else -> {
+                              val totalFound = candidates.size
+                              val duplicateCount = candidates.count { it.isDuplicate }
+                              val selectedCount = candidates.count { it.selectedToImport }
+
+                              Text(
+                                  text = "Found $totalFound transactions ($duplicateCount duplicates auto-skipped). Tap category badge to cycle.",
+                                  color = Color(0xFFA1A1AA),
+                                  fontSize = 12.sp
+                              )
+
+                              LazyColumn(
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .heightIn(max = 380.dp),
+                                  verticalArrangement = Arrangement.spacedBy(8.dp)
+                              ) {
+                                  itemsIndexed(candidates) { idx, item ->
+                                      val cat = TransactionCategory.fromNameOrDefault(item.dto.category)
+                                      Row(
+                                          modifier = Modifier
+                                              .fillMaxWidth()
+                                              .clip(RoundedCornerShape(10.dp))
+                                              .background(Color(0xFF09090B))
+                                              .border(
+                                                  1.dp,
+                                                  if (item.isDuplicate) Color(0xFF52525B) else Color(0xFF27272A),
+                                                  RoundedCornerShape(10.dp)
+                                              )
+                                              .padding(10.dp),
+                                          verticalAlignment = Alignment.CenterVertically,
+                                          horizontalArrangement = Arrangement.SpaceBetween
+                                      ) {
+                                          Row(
+                                              verticalAlignment = Alignment.CenterVertically,
+                                              horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                              modifier = Modifier.weight(1f)
+                                          ) {
+                                              Checkbox(
+                                                  checked = item.selectedToImport,
+                                                  onCheckedChange = { onToggleSelect(idx) }
+                                              )
+                                              Box(
+                                                  modifier = Modifier
+                                                      .clip(RoundedCornerShape(8.dp))
+                                                      .background(Color(cat.colorHex).copy(alpha = 0.2f))
+                                                      .clickable { onCycleCategory(idx) }
+                                                      .padding(horizontal = 8.dp, vertical = 6.dp)
+                                              ) {
+                                                  Text(text = cat.symbol, fontSize = 16.sp)
+                                              }
+                                              Column {
+                                                  Text(
+                                                      text = item.dto.cleanDisplayName,
+                                                      color = Color.White,
+                                                      fontSize = 13.sp,
+                                                      fontWeight = FontWeight.Medium,
+                                                      maxLines = 1
+                                                  )
+                                                  Text(
+                                                      text = buildString {
+                                                          append(item.dto.isoDate.take(10))
+                                                          append(" • ")
+                                                          append(item.dto.sourceAccountName)
+                                                          if (item.isDuplicate) append(" • [DUPLICATE]")
+                                                      },
+                                                      color = if (item.isDuplicate) Color(0xFFF59E0B) else Color(0xFF71717A),
+                                                      fontSize = 11.sp
+                                                  )
+                                              }
+                                          }
+
+                                          Text(
+                                              text = "RM %.2f".format(item.dto.amountInMyr),
+                                              color = if (item.dto.isSelfTransfer) Color(0xFF38BDF8) else Color.White,
+                                              fontWeight = FontWeight.Bold,
+                                              fontSize = 13.sp
+                                          )
+                                      }
+                                  }
+                              }
+
+                              Button(
+                                  onClick = onConfirmImport,
+                                  enabled = selectedCount > 0,
+                                  modifier = Modifier.fillMaxWidth(),
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                              ) {
+                                  Text(
+                                      text = "Confirm & Import $selectedCount Transactions",
+                                      color = Color.Black,
+                                      fontWeight = FontWeight.Bold
+                                  )
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          ''',
+
+              "app/src/main/java/com/nicholas/financetracker/ui/DashboardScreen.kt": r'''package com.nicholas.financetracker.ui
+
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Add
+          import androidx.compose.material.icons.filled.FileUpload
+          import androidx.compose.material.icons.filled.Key
+          import androidx.compose.material.icons.filled.LocationOn
+          import androidx.compose.material.icons.filled.Security
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import com.nicholas.financetracker.data.local.*
+          import java.time.Instant
+          import java.time.ZoneId
+          import java.time.format.DateTimeFormatter
+
+          @OptIn(ExperimentalMaterial3Api::class)
+          @Composable
+          fun DashboardScreen(
+              accounts: List<AccountEntity>,
+              transactions: List<TransactionEntity>,
+              selectedAccountId: Long?,
+              isNotificationListenerEnabled: Boolean,
+              onSelectAccount: (Long?) -> Unit,
+              onOpenBankModeSettings: () -> Unit,
+              onOpenDeveloperSettings: () -> Unit,
+              onOpenApiKeyDialog: () -> Unit,
+              onTriggerBulkImport: () -> Unit,
+              onOpenQuickAdd: () -> Unit,
+              onTransactionClick: (TransactionEntity) -> Unit
+          ) {
+              val filteredTransactions = remember(transactions, selectedAccountId) {
+                  if (selectedAccountId == null) {
+                      transactions
+                  } else {
+                      transactions.filter {
+                          it.sourceAccountId == selectedAccountId || it.destinationAccountId == selectedAccountId
+                      }
+                  }
+              }
+
+              val displayedBalance = remember(accounts, selectedAccountId) {
+                  if (selectedAccountId == null) {
+                      accounts.sumOf { it.balance }
+                  } else {
+                      accounts.find { it.id == selectedAccountId }?.balance ?: 0.0
+                  }
+              }
+
+              val totalMonthlyExpense = remember(filteredTransactions) {
+                  filteredTransactions
+                      .filter { !it.isSelfTransfer && it.transactionType == TransactionType.EXPENSE.name }
+                      .sumOf { it.amount }
+              }
+
+              val totalMonthlyIncome = remember(filteredTransactions) {
+                  filteredTransactions
+                      .filter { !it.isSelfTransfer && it.transactionType == TransactionType.INCOME.name }
+                      .sumOf { it.amount }
+              }
+
+              val categoryBreakdown = remember(filteredTransactions) {
+                  val expenses = filteredTransactions.filter {
+                      !it.isSelfTransfer && it.transactionType == TransactionType.EXPENSE.name
+                  }
+                  val sum = expenses.sumOf { it.amount }.coerceAtLeast(1.0)
+                  expenses
+                      .groupBy { TransactionCategory.fromNameOrDefault(it.category) }
+                      .mapValues { (_, list) -> (list.sumOf { it.amount } / sum).toFloat() }
+                      .toList()
+                      .sortedByDescending { it.second }
+              }
+
+              val groupedByDate = remember(filteredTransactions) {
+                  val formatter = DateTimeFormatter.ofPattern("EEE, dd MMM yyyy")
+                  filteredTransactions.groupBy { tx ->
+                      Instant.ofEpochMilli(tx.timestamp)
+                          .atZone(ZoneId.systemDefault())
+                          .toLocalDate()
+                          .format(formatter)
+                  }
+              }
+
+              val accountMap = remember(accounts) { accounts.associateBy { it.id } }
+
+              Scaffold(
+                  containerColor = Color(0xFF09090B),
+                  floatingActionButton = {
+                      FloatingActionButton(
+                          onClick = onOpenQuickAdd,
+                          containerColor = Color(0xFF10B981),
+                          contentColor = Color.Black
+                      ) {
+                          Icon(Icons.Default.Add, contentDescription = "Log Cash / Test Notification")
+                      }
+                  }
+              ) { paddingValues ->
+                  LazyColumn(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .padding(paddingValues)
+                          .padding(horizontal = 16.dp),
+                      verticalArrangement = Arrangement.spacedBy(14.dp),
+                      contentPadding = PaddingValues(top = 16.dp, bottom = 92.dp)
+                  ) {
+                      item {
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Column {
+                                  Text(
+                                      text = "PULSE LEDGER • 3.8 FLASH",
+                                      color = Color.White,
+                                      fontSize = 17.sp,
+                                      fontWeight = FontWeight.ExtraBold,
+                                      letterSpacing = 1.sp
+                                  )
+                                  Row(
+                                      verticalAlignment = Alignment.CenterVertically,
+                                      horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                      modifier = Modifier.clickable { onOpenBankModeSettings() }
+                                  ) {
+                                      Box(
+                                          modifier = Modifier
+                                              .size(8.dp)
+                                              .clip(CircleShape)
+                                              .background(
+                                                  if (isNotificationListenerEnabled) Color(0xFF10B981)
+                                                  else Color(0xFFF59E0B)
+                                              )
+                                      )
+                                      Text(
+                                          text = if (isNotificationListenerEnabled) "Listener Active (Tap to Pause)"
+                                          else "Listener Paused (Tap to Enable)",
+                                          color = Color(0xFFA1A1AA),
+                                          fontSize = 11.sp
+                                      )
+                                  }
+                              }
+
+                              Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                  IconButton(
+                                      onClick = onTriggerBulkImport,
+                                      modifier = Modifier
+                                          .clip(RoundedCornerShape(10.dp))
+                                          .background(Color(0xFF18181B))
+                                          .border(1.dp, Color(0xFF27272A), RoundedCornerShape(10.dp))
+                                  ) {
+                                      Icon(
+                                          imageVector = Icons.Default.FileUpload,
+                                          contentDescription = "Import History",
+                                          tint = Color(0xFF38BDF8)
+                                      )
+                                  }
+                                  IconButton(
+                                      onClick = onOpenDeveloperSettings,
+                                      modifier = Modifier
+                                          .clip(RoundedCornerShape(10.dp))
+                                          .background(Color(0xFF18181B))
+                                          .border(1.dp, Color(0xFF27272A), RoundedCornerShape(10.dp))
+                                  ) {
+                                      Icon(
+                                          imageVector = Icons.Default.Security,
+                                          contentDescription = "Dev Options Shortcut",
+                                          tint = Color(0xFFA1A1AA)
+                                      )
+                                  }
+                                  IconButton(
+                                      onClick = onOpenApiKeyDialog,
+                                      modifier = Modifier
+                                          .clip(RoundedCornerShape(10.dp))
+                                          .background(Color(0xFF18181B))
+                                          .border(1.dp, Color(0xFF27272A), RoundedCornerShape(10.dp))
+                                  ) {
+                                      Icon(
+                                          imageVector = Icons.Default.Key,
+                                          contentDescription = "Gemini API Key",
+                                          tint = Color(0xFFFBBF24)
+                                      )
+                                  }
+                              }
+                          }
+                      }
+
+                      item {
+                          LazyRow(
+                              horizontalArrangement = Arrangement.spacedBy(8.dp),
+                              modifier = Modifier.fillMaxWidth()
+                          ) {
+                              item {
+                                  AccountPill(
+                                      title = "All Accounts",
+                                      subtitle = "RM %.2f".format(accounts.sumOf { it.balance }),
+                                      isSelected = selectedAccountId == null,
+                                      onClick = { onSelectAccount(null) }
+                                  )
+                              }
+                              items(accounts) { acc ->
+                                  AccountPill(
+                                      title = acc.name,
+                                      subtitle = "RM %.2f".format(acc.balance),
+                                      isSelected = selectedAccountId == acc.id,
+                                      onClick = { onSelectAccount(acc.id) }
+                                  )
+                              }
+                          }
+                      }
+
+                      item {
+                          Column(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .clip(RoundedCornerShape(16.dp))
+                                  .background(Color(0xFF18181B))
+                                  .border(1.dp, Color(0xFF27272A), RoundedCornerShape(16.dp))
+                                  .padding(18.dp),
+                              verticalArrangement = Arrangement.spacedBy(14.dp)
+                          ) {
+                              Row(
+                                  modifier = Modifier.fillMaxWidth(),
+                                  horizontalArrangement = Arrangement.SpaceBetween,
+                                  verticalAlignment = Alignment.Bottom
+                              ) {
+                                  Column {
+                                      Text(
+                                          text = if (selectedAccountId == null) "CONSOLIDATED BALANCE"
+                                          else accountMap[selectedAccountId]?.name?.uppercase().orEmpty(),
+                                          color = Color(0xFF71717A),
+                                          fontSize = 11.sp,
+                                          fontWeight = FontWeight.SemiBold
+                                      )
+                                      Text(
+                                          text = "RM %.2f".format(displayedBalance),
+                                          color = Color.White,
+                                          fontSize = 28.sp,
+                                          fontWeight = FontWeight.ExtraBold
+                                      )
+                                  }
+                                  Column(horizontalAlignment = Alignment.End) {
+                                      Text(
+                                          text = "-RM %.2f Spend".format(totalMonthlyExpense),
+                                          color = Color(0xFFF43F5E),
+                                          fontSize = 13.sp,
+                                          fontWeight = FontWeight.SemiBold
+                                      )
+                                      Text(
+                                          text = "+RM %.2f Income".format(totalMonthlyIncome),
+                                          color = Color(0xFF10B981),
+                                          fontSize = 12.sp
+                                      )
+                                  }
+                              }
+
+                              if (categoryBreakdown.isNotEmpty()) {
+                                  Canvas(
+                                      modifier = Modifier
+                                          .fillMaxWidth()
+                                          .height(10.dp)
+                                          .clip(RoundedCornerShape(5.dp))
+                                  ) {
+                                      var startX = 0f
+                                      categoryBreakdown.forEach { (cat, ratio) ->
+                                          val segmentWidth = size.width * ratio
+                                          drawRect(
+                                              color = Color(cat.colorHex),
+                                              topLeft = Offset(startX, 0f),
+                                              size = Size(segmentWidth, size.height)
+                                          )
+                                          startX += segmentWidth
+                                      }
+                                  }
+
+                                  LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                      items(categoryBreakdown.take(5)) { (cat, ratio) ->
+                                          Row(
+                                              verticalAlignment = Alignment.CenterVertically,
+                                              horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                          ) {
+                                              Text(text = cat.symbol, fontSize = 12.sp)
+                                              Text(
+                                                  text = "${(ratio * 100).toInt()}%",
+                                                  color = Color(0xFFD4D4D8),
+                                                  fontSize = 11.sp,
+                                                  fontWeight = FontWeight.Medium
+                                              )
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+
+                      if (groupedByDate.isEmpty()) {
+                          item {
+                              Box(
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .padding(vertical = 48.dp),
+                                  contentAlignment = Alignment.Center
+                              ) {
+                                  Text(
+                                      text = "No transactions yet. Pay with QR/Card, tap Upload to bulk-import past statements, or tap + to test.",
+                                      color = Color(0xFF71717A),
+                                      fontSize = 13.sp
+                                  )
+                              }
+                          }
+                      } else {
+                          groupedByDate.forEach { (dateHeader, dayTransactions) ->
+                              item {
+                                  Text(
+                                      text = dateHeader.uppercase(),
+                                      color = Color(0xFF71717A),
+                                      fontSize = 11.sp,
+                                      fontWeight = FontWeight.Bold,
+                                      modifier = Modifier.padding(top = 6.dp)
+                                  )
+                              }
+                              items(dayTransactions, key = { it.id }) { tx ->
+                                  TransactionRowCard(
+                                      tx = tx,
+                                      accountMap = accountMap,
+                                      onClick = { onTransactionClick(tx) }
+                                  )
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun AccountPill(
+              title: String,
+              subtitle: String,
+              isSelected: Boolean,
+              onClick: () -> Unit
+          ) {
+              Column(
+                  modifier = Modifier
+                      .clip(RoundedCornerShape(12.dp))
+                      .background(if (isSelected) Color(0xFF27272A) else Color(0xFF18181B))
+                      .border(
+                          width = 1.dp,
+                          color = if (isSelected) Color.White else Color(0xFF27272A),
+                          shape = RoundedCornerShape(12.dp)
+                      )
+                      .clickable(onClick = onClick)
+                      .padding(horizontal = 14.dp, vertical = 10.dp)
+              ) {
+                  Text(
+                      text = title,
+                      color = Color.White,
+                      fontSize = 12.sp,
+                      fontWeight = FontWeight.SemiBold
+                  )
+                  Text(
+                      text = subtitle,
+                      color = Color(0xFFA1A1AA),
+                      fontSize = 11.sp
+                  )
+              }
+          }
+
+          @Composable
+          private fun TransactionRowCard(
+              tx: TransactionEntity,
+              accountMap: Map<Long, AccountEntity>,
+              onClick: () -> Unit
+          ) {
+              val category = TransactionCategory.fromNameOrDefault(tx.category)
+              val srcName = accountMap[tx.sourceAccountId]?.name ?: "Account"
+              val dstName = tx.destinationAccountId?.let { accountMap[it]?.name }
+
+              val amountColor = when {
+                  tx.isSelfTransfer -> Color(0xFF38BDF8)
+                  tx.transactionType == TransactionType.INCOME.name -> Color(0xFF10B981)
+                  else -> Color(0xFFF43F5E)
+              }
+
+              val amountPrefix = when {
+                  tx.isSelfTransfer -> "🔄 "
+                  tx.transactionType == TransactionType.INCOME.name -> "+"
+                  else -> "-"
+              }
+
+              Row(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .clip(RoundedCornerShape(14.dp))
+                      .background(Color(0xFF18181B))
+                      .border(1.dp, Color(0xFF27272A), RoundedCornerShape(14.dp))
+                      .clickable(onClick = onClick)
+                      .padding(horizontal = 14.dp, vertical = 12.dp),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Row(
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(12.dp),
+                      modifier = Modifier.weight(1f)
+                  ) {
+                      Box(
+                          modifier = Modifier
+                              .size(42.dp)
+                              .clip(RoundedCornerShape(10.dp))
+                              .background(Color(category.colorHex).copy(alpha = 0.18f)),
+                          contentAlignment = Alignment.Center
+                      ) {
+                          Text(text = category.symbol, fontSize = 20.sp)
+                      }
+
+                      Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                          Text(
+                              text = tx.displayName,
+                              color = Color.White,
+                              fontSize = 14.sp,
+                              fontWeight = FontWeight.SemiBold,
+                              maxLines = 1
+                          )
+
+                          if (!tx.locationLabel.isNullOrBlank()) {
+                              Row(
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(3.dp)
+                              ) {
+                                  Icon(
+                                      imageVector = Icons.Default.LocationOn,
+                                      contentDescription = null,
+                                      tint = Color(0xFF38BDF8),
+                                      modifier = Modifier.size(12.dp)
+                                  )
+                                  Text(
+                                      text = tx.locationLabel,
+                                      color = Color(0xFF38BDF8),
+                                      fontSize = 11.sp,
+                                      maxLines = 1
+                                  )
+                              }
+                          }
+
+                          Text(
+                              text = if (tx.isSelfTransfer && dstName != null) "$srcName → $dstName"
+                              else "$srcName • ${category.displayName}",
+                              color = Color(0xFF71717A),
+                              fontSize = 11.sp
+                          )
+                      }
+                  }
+
+                  Column(horizontalAlignment = Alignment.End) {
+                      Text(
+                          text = "${amountPrefix}RM %.2f".format(tx.amount),
+                          color = amountColor,
+                          fontSize = 14.sp,
+                          fontWeight = FontWeight.Bold
+                      )
+                      if (tx.originalCurrency != "MYR") {
+                          Text(
+                              text = "${tx.originalCurrency} %.2f".format(tx.originalAmount),
+                              color = Color(0xFF71717A),
+                              fontSize = 10.sp
+                          )
+                      }
+                  }
+              }
+          }
+          ''',
+
+              "app/src/main/java/com/nicholas/financetracker/ui/MainActivity.kt": r'''package com.nicholas.financetracker.ui
+
+          import android.Manifest
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.unit.dp
+          import androidx.lifecycle.lifecycleScope
+          import com.nicholas.financetracker.data.local.*
+          import com.nicholas.financetracker.data.remote.GeminiFinanceEngine
+          import com.nicholas.financetracker.service.TransactionNotificationService
+          import kotlinx.coroutines.launch
+
+          class MainActivity : ComponentActivity() {
+
+              private val db by lazy { AppDatabase.getInstance(applicationContext) }
+              private val dao by lazy { db.financeDao() }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  setContent {
+                      MaterialTheme(colorScheme = darkColorScheme()) {
+                          val accounts by dao.observeAccounts().collectAsState(initial = emptyList())
+                          val transactions by dao.observeAllTransactions().collectAsState(initial = emptyList())
+
+                          var selectedAccountId by remember { mutableStateOf<Long?>(null) }
+                          var editingTransaction by remember { mutableStateOf<TransactionEntity?>(null) }
+                          var showApiKeyDialog by remember { mutableStateOf(false) }
+                          var showQuickAddDialog by remember { mutableStateOf(false) }
+
+                          var showBulkImportSheet by remember { mutableStateOf(false) }
+                          var isBulkImporting by remember { mutableStateOf(false) }
+                          var bulkImportError by remember { mutableStateOf<String?>(null) }
+                          var importCandidates by remember { mutableStateOf<List<ImportCandidateItem>>(emptyList()) }
+
+                          var isListenerEnabled by remember {
+                              mutableStateOf(checkNotificationListenerEnabled())
+                          }
+
+                          val locationPermissionLauncher = rememberLauncherForActivityResult(
+                              ActivityResultContracts.RequestMultiplePermissions()
+                          ) { }
+
+                          LaunchedEffect(Unit) {
+                              locationPermissionLauncher.launch(
+                                  arrayOf(
+                                      Manifest.permission.ACCESS_FINE_LOCATION,
+                                      Manifest.permission.ACCESS_COARSE_LOCATION
+                                  )
+                              )
+                          }
+
+                          val bulkFilePickerLauncher = rememberLauncherForActivityResult(
+                              ActivityResultContracts.OpenMultipleDocuments()
+                          ) { uris: List<Uri> ->
+                              if (uris.isNotEmpty()) {
+                                  showBulkImportSheet = true
+                                  isBulkImporting = true
+                                  bulkImportError = null
+                                  lifecycleScope.launch {
+                                      runCatching {
+                                          val apiKey = getSavedApiKey()
+                                          if (apiKey.isBlank()) {
+                                              throw IllegalStateException("Please tap the yellow Key icon and save your Gemini API Key first.")
+                                          }
+                                          val currentAccs = dao.getAllAccountsOnce()
+                                          val currentRules = dao.getAllMerchantRules()
+                                          val existingTxs = dao.getAllTransactionsOnce()
+
+                                          val extractedDtos = GeminiFinanceEngine.parseStatementFiles(
+                                              apiKey = apiKey,
+                                              contentResolver = contentResolver,
+                                              fileUris = uris,
+                                              accounts = currentAccs,
+                                              savedRules = currentRules
+                                          )
+
+                                          importCandidates = extractedDtos.map { dto ->
+                                              val epoch = GeminiFinanceEngine.parseIsoDateToEpochMillis(dto.isoDate)
+                                              val isDup = AppDatabase.isLikelyDuplicate(
+                                                  candidateTimestamp = epoch,
+                                                  candidateAmountMyr = dto.amountInMyr,
+                                                  candidateMerchant = dto.rawMerchantOrRecipient,
+                                                  existingList = existingTxs
+                                              )
+                                              ImportCandidateItem(dto = dto, isDuplicate = isDup)
+                                          }
+                                      }.onFailure { err ->
+                                          bulkImportError = err.message ?: "Failed to parse statement files."
+                                      }
+                                      isBulkImporting = false
+                                  }
+                              }
+                          }
+
+                          DashboardScreen(
+                              accounts = accounts,
+                              transactions = transactions,
+                              selectedAccountId = selectedAccountId,
+                              isNotificationListenerEnabled = isListenerEnabled,
+                              onSelectAccount = { selectedAccountId = it },
+                              onOpenBankModeSettings = {
+                                  startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                              },
+                              onOpenDeveloperSettings = {
+                                  runCatching {
+                                      startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+                                  }.onFailure {
+                                      startActivity(Intent(Settings.ACTION_SETTINGS))
+                                  }
+                              },
+                              onOpenApiKeyDialog = { showApiKeyDialog = true },
+                              onTriggerBulkImport = {
+                                  bulkFilePickerLauncher.launch(
+                                      arrayOf("application/pdf", "text/csv", "text/comma-separated-values", "image/*")
+                                  )
+                              },
+                              onOpenQuickAdd = { showQuickAddDialog = true },
+                              onTransactionClick = { editingTransaction = it }
+                          )
+
+                          editingTransaction?.let { tx ->
+                              EditTransactionSheet(
+                                  transaction = tx,
+                                  accounts = accounts,
+                                  onDismiss = { editingTransaction = null },
+                                  onSave = { updatedTx, saveRule ->
+                                      lifecycleScope.launch {
+                                          dao.updateTransactionAndSyncBalances(tx, updatedTx)
+                                          if (saveRule) {
+                                              dao.upsertMerchantRule(
+                                                  MerchantRuleEntity(
+                                                      normalizedRecipient = AppDatabase.normalizeRecipientKey(
+                                                          updatedTx.rawMerchantOrRecipient
+                                                      ),
+                                                      customDisplayName = updatedTx.displayName,
+                                                      assignedCategory = updatedTx.category,
+                                                      forceSelfTransfer = updatedTx.isSelfTransfer,
+                                                      defaultDestinationAccountId = updatedTx.destinationAccountId,
+                                                      savedLatitude = updatedTx.latitude,
+                                                      savedLongitude = updatedTx.longitude
+                                                  )
+                                              )
+                                          }
+                                          editingTransaction = null
+                                      }
+                                  },
+                                  onDelete = { toDelete ->
+                                      lifecycleScope.launch {
+                                          dao.deleteTransactionAndSyncBalances(toDelete)
+                                          editingTransaction = null
+                                      }
+                                  }
+                              )
+                          }
+
+                          if (showBulkImportSheet) {
+                              BulkImportDialog(
+                                  candidates = importCandidates,
+                                  isLoading = isBulkImporting,
+                                  errorMessage = bulkImportError,
+                                  onToggleSelect = { idx ->
+                                      importCandidates = importCandidates.toMutableList().also { list ->
+                                          val item = list[idx]
+                                          list[idx] = item.copy(selectedToImport = !item.selectedToImport)
+                                      }
+                                  },
+                                  onCycleCategory = { idx ->
+                                      importCandidates = importCandidates.toMutableList().also { list ->
+                                          val item = list[idx]
+                                          val allCats = TransactionCategory.entries
+                                          val cur = TransactionCategory.fromNameOrDefault(item.dto.category)
+                                          val next = allCats[(allCats.indexOf(cur) + 1) % allCats.size]
+                                          list[idx] = item.copy(
+                                              dto = item.dto.copy(
+                                                  category = next.name,
+                                                  isSelfTransfer = (next == TransactionCategory.SELF_TRANSFER)
+                                              )
+                                          )
+                                      }
+                                  },
+                                  onConfirmImport = {
+                                      lifecycleScope.launch {
+                                          val currentAccs = dao.getAllAccountsOnce()
+                                          val entitiesToInsert = importCandidates
+                                              .filter { it.selectedToImport }
+                                              .map { item ->
+                                                  val dto = item.dto
+                                                  val src = currentAccs.find {
+                                                      it.name.equals(dto.sourceAccountName, ignoreCase = true)
+                                                  } ?: currentAccs.first()
+                                                  val dst = currentAccs.find {
+                                                      it.name.equals(dto.destinationAccountName, ignoreCase = true)
+                                                  }
+                                                  TransactionEntity(
+                                                      timestamp = GeminiFinanceEngine.parseIsoDateToEpochMillis(dto.isoDate),
+                                                      amount = dto.amountInMyr,
+                                                      originalAmount = dto.amount,
+                                                      originalCurrency = dto.currency,
+                                                      rawMerchantOrRecipient = dto.rawMerchantOrRecipient,
+                                                      displayName = dto.cleanDisplayName,
+                                                      category = dto.category,
+                                                      transactionType = if (dto.isSelfTransfer) TransactionType.TRANSFER.name else dto.transactionType,
+                                                      isSelfTransfer = dto.isSelfTransfer,
+                                                      sourceAccountId = src.id,
+                                                      destinationAccountId = if (dto.isSelfTransfer) (dst?.id ?: 3L) else null
+                                                  )
+                                              }
+                                          dao.bulkInsertAndSyncBalances(entitiesToInsert)
+                                          showBulkImportSheet = false
+                                      }
+                                  },
+                                  onDismiss = { showBulkImportSheet = false }
+                              )
+                          }
+
+                          if (showApiKeyDialog) {
+                              var keyText by remember { mutableStateOf(getSavedApiKey()) }
+                              AlertDialog(
+                                  onDismissRequest = { showApiKeyDialog = false },
+                                  containerColor = Color(0xFF18181B),
+                                  title = { Text("Gemini 3.8 Flash API Key", color = Color.White) },
+                                  text = {
+                                      OutlinedTextField(
+                                          value = keyText,
+                                          onValueChange = { keyText = it },
+                                          label = { Text("Paste Google AI Studio Key") },
+                                          singleLine = true
+                                      )
+                                  },
+                                  confirmButton = {
+                                      TextButton(onClick = {
+                                          saveApiKey(keyText.trim())
+                                          showApiKeyDialog = false
+                                      }) {
+                                          Text("Save Key", color = Color(0xFF10B981))
+                                      }
+                                  }
+                              )
+                          }
+
+                          if (showQuickAddDialog) {
+                              var sampleText by remember {
+                                  mutableStateOf("MAE: You have paid RM 14.50 to AHMAD BIN ALI via DuitNow QR.")
+                              }
+                              var sampleLat by remember { mutableStateOf("1.5584") }
+                              var sampleLon by remember { mutableStateOf("103.6378") }
+                              var isSimulating by remember { mutableStateOf(false) }
+
+                              AlertDialog(
+                                  onDismissRequest = { if (!isSimulating) showQuickAddDialog = false },
+                                  containerColor = Color(0xFF18181B),
+                                  title = { Text("Log Cash or Test Gemini 3.8 + GPS", color = Color.White) },
+                                  text = {
+                                      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                          OutlinedTextField(
+                                              value = sampleText,
+                                              onValueChange = { sampleText = it },
+                                              label = { Text("Notification or Cash Note") }
+                                          )
+                                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                              OutlinedTextField(
+                                                  value = sampleLat,
+                                                  onValueChange = { sampleLat = it },
+                                                  label = { Text("Latitude") },
+                                                  modifier = Modifier.weight(1f)
+                                              )
+                                              OutlinedTextField(
+                                                  value = sampleLon,
+                                                  onValueChange = { sampleLon = it },
+                                                  label = { Text("Longitude") },
+                                                  modifier = Modifier.weight(1f)
+                                              )
+                                          }
+                                      }
+                                  },
+                                  confirmButton = {
+                                      Button(
+                                          enabled = !isSimulating,
+                                          onClick = {
+                                              isSimulating = true
+                                              lifecycleScope.launch {
+                                                  val apiKey = getSavedApiKey()
+                                                  val curAccs = dao.getAllAccountsOnce()
+                                                  val curRules = dao.getAllMerchantRules()
+                                                  val lat = sampleLat.toDoubleOrNull()
+                                                  val lon = sampleLon.toDoubleOrNull()
+
+                                                  val parsed = if (apiKey.isNotBlank()) {
+                                                      GeminiFinanceEngine.parseLiveNotification(
+                                                          apiKey = apiKey,
+                                                          appPackage = "com.maybank2u.life",
+                                                          notificationText = sampleText,
+                                                          timestampMs = System.currentTimeMillis(),
+                                                          lat = lat,
+                                                          lon = lon,
+                                                          accounts = curAccs,
+                                                          savedRules = curRules
+                                                      )
+                                                  } else {
+                                                      GeminiFinanceEngine.fallbackHeuristicParse(
+                                                          "com.maybank2u.life", sampleText, "Campus Food Court"
+                                                      )
+                                                  }
+
+                                                  val src = curAccs.find {
+                                                      it.name.equals(parsed.sourceAccountName, ignoreCase = true)
+                                                  } ?: curAccs.first()
+
+                                                  dao.insertTransactionAndSyncBalances(
+                                                      TransactionEntity(
+                                                          timestamp = System.currentTimeMillis(),
+                                                          amount = parsed.amountInMyr,
+                                                          originalAmount = parsed.amount,
+                                                          originalCurrency = parsed.currency,
+                                                          rawMerchantOrRecipient = parsed.rawMerchantOrRecipient,
+                                                          displayName = parsed.cleanDisplayName,
+                                                          category = parsed.category,
+                                                          transactionType = parsed.transactionType,
+                                                          isSelfTransfer = parsed.isSelfTransfer,
+                                                          sourceAccountId = src.id,
+                                                          destinationAccountId = if (parsed.isSelfTransfer) 3L else null,
+                                                          latitude = lat,
+                                                          longitude = lon,
+                                                          locationLabel = parsed.inferredLocationLabel,
+                                                          rawNotificationText = sampleText
+                                                      )
+                                                  )
+                                                  isSimulating = false
+                                                  showQuickAddDialog = false
+                                              }
+                                          }
+                                      ) {
+                                          Text(if (isSimulating) "Parsing..." else "Run Gemini 3.8 + GPS")
+                                      }
+                                  }
+                              )
+                          }
+                      }
+                  }
+              }
+
+              private fun checkNotificationListenerEnabled(): Boolean {
+                  val cn = ComponentName(this, TransactionNotificationService::class.java)
+                  val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+                  return flat != null && flat.contains(cn.flattenToString())
+              }
+
+              private fun getSavedApiKey(): String {
+                  val prefs = getSharedPreferences(TransactionNotificationService.PREFS_NAME, Context.MODE_PRIVATE)
+                  return prefs.getString(TransactionNotificationService.KEY_GEMINI_API, "") ?: ""
+              }
+
+              private fun saveApiKey(key: String) {
+                  getSharedPreferences(TransactionNotificationService.PREFS_NAME, Context.MODE_PRIVATE)
+                      .edit()
+                      .putString(TransactionNotificationService.KEY_GEMINI_API, key)
+                      .apply()
+              }
+          }
+          '''
+          }
+
+          for rel_path, content in FILES.items():
+              p = Path(rel_path)
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(content.strip() + "\n", encoding="utf-8")
+          EOF
+
+      - name: Compile Debug APK with Gradle
+        run: |
+          gradle assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk PulseFinance.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PulseFinance-APK
+          path: PulseFinance.apk
+
+      - name: Publish Direct Download Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "Pulse Finance APK (Build #${{ github.run_number }})"
+          files: PulseFinance.apk
